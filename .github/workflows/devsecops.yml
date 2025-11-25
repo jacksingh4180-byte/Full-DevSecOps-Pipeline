@@ -4,9 +4,9 @@ on: [push, pull_request]
 
 jobs:
 
-  # --------------------------
+  # -----------------------------------------
   # 1. SAST - Snyk Code
-  # --------------------------
+  # -----------------------------------------
   sast:
     runs-on: ubuntu-latest
 
@@ -15,54 +15,78 @@ jobs:
 
       - uses: snyk/actions/setup@master
 
-      - name: Snyk SAST Scan
-        run: snyk code test
-        continue-on-error: true
+      - name: Run Snyk SAST
+        id: sast-scan
+        run: |
+          snyk code test --severity-threshold=high --json > sast-report.json
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
 
-  # --------------------------
+      - name: Upload SAST Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: sast-report
+          path: sast-report.json
+
+  # -----------------------------------------
   # 2. SCA - Snyk Open Source
-  # --------------------------
+  # -----------------------------------------
   sca:
     runs-on: ubuntu-latest
-    needs: sast   # Run after SAST
+    needs: sast
+    continue-on-error: true   # Continue even if SAST failed
 
     steps:
       - uses: actions/checkout@v4
 
       - uses: snyk/actions/setup@master
 
-      - name: Snyk SCA Scan
-        run: snyk test --all-projects
-        continue-on-error: true
+      - name: Run SCA Scan
+        id: sca-scan
+        run: |
+          snyk test --all-projects --severity-threshold=high --json > sca-report.json
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
 
-  # --------------------------
+      - name: Upload SCA Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: sca-report
+          path: sca-report.json
+
+  # -----------------------------------------
   # 3. IaC - Snyk IaC
-  # --------------------------
+  # -----------------------------------------
   iac:
     runs-on: ubuntu-latest
-    needs: sca  # Run after SCA
+    needs: sca
+    continue-on-error: true
 
     steps:
       - uses: actions/checkout@v4
 
       - uses: snyk/actions/setup@master
 
-      - name: Snyk IaC Scan
-        run: snyk iac test
-        continue-on-error: true
+      - name: Run IaC Scan
+        id: iac-scan
+        run: |
+          snyk iac test --severity-threshold=high --json > iac-report.json
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
 
-  # --------------------------
+      - name: Upload IaC Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: iac-report
+          path: iac-report.json
+
+  # -----------------------------------------
   # 4. DAST - OWASP ZAP Baseline
-  # --------------------------
+  # -----------------------------------------
   dast:
     runs-on: ubuntu-latest
-    needs: iac  # Run after IaC
+    needs: iac
+    continue-on-error: true
 
     steps:
       - uses: actions/checkout@v4
@@ -73,10 +97,44 @@ jobs:
       - name: Run App
         run: |
           docker run -d -p 8080:8080 myapp
-          sleep 10   # wait for app to boot
+          sleep 15
 
-      - name: ZAP DAST Baseline
+      - name: ZAP Baseline Scan
+        id: zap-scan
         uses: zaproxy/action-baseline@v0.9.0
-        continue-on-error: true
         with:
           target: "http://localhost:8080"
+          cmd_options: "-j"   # enable JSON output
+
+      - name: Upload ZAP Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-report
+          path: zap_baseline.json
+
+  # -----------------------------------------
+  # 5. Final Job – Fail Pipeline if any scan failed
+  # -----------------------------------------
+  summary:
+    runs-on: ubuntu-latest
+    needs: [sast, sca, iac, dast]
+
+    steps:
+      - name: Check SAST Status
+        if: ${{ needs.sast.result == 'failure' }}
+        run: exit 1
+
+      - name: Check SCA Status
+        if: ${{ needs.sca.result == 'failure' }}
+        run: exit 1
+
+      - name: Check IaC Status
+        if: ${{ needs.iac.result == 'failure' }}
+        run: exit 1
+
+      - name: Check DAST Status
+        if: ${{ needs.dast.result == 'failure' }}
+        run: exit 1
+
+      - name: All Scans Passed
+        run: echo "All DevSecOps scans completed."
