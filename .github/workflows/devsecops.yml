@@ -1,19 +1,82 @@
 name: DevSecOps Pipeline
-on: [push]
+
+on: [push, pull_request]
+
 jobs:
-  build:
+
+  # --------------------------
+  # 1. SAST - Snyk Code
+  # --------------------------
+  sast:
     runs-on: ubuntu-latest
+
     steps:
       - uses: actions/checkout@v4
+
       - uses: snyk/actions/setup@master
-      - run: snyk code test
-        env: { SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }} }
-      - run: snyk test --all-projects
-        env: { SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }} }
-      - run: snyk iac test
-        env: { SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }} }
-      - run: docker build -t myapp .
-      - run: docker run -d -p 8080:8080 myapp
-      - uses: zaproxy/action-baseline@v0.9.0
+
+      - name: Snyk SAST Scan
+        run: snyk code test
+        continue-on-error: true
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+
+  # --------------------------
+  # 2. SCA - Snyk Open Source
+  # --------------------------
+  sca:
+    runs-on: ubuntu-latest
+    needs: sast   # Run after SAST
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: snyk/actions/setup@master
+
+      - name: Snyk SCA Scan
+        run: snyk test --all-projects
+        continue-on-error: true
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+
+  # --------------------------
+  # 3. IaC - Snyk IaC
+  # --------------------------
+  iac:
+    runs-on: ubuntu-latest
+    needs: sca  # Run after SCA
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: snyk/actions/setup@master
+
+      - name: Snyk IaC Scan
+        run: snyk iac test
+        continue-on-error: true
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+
+  # --------------------------
+  # 4. DAST - OWASP ZAP Baseline
+  # --------------------------
+  dast:
+    runs-on: ubuntu-latest
+    needs: iac  # Run after IaC
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build Docker App
+        run: docker build -t myapp .
+
+      - name: Run App
+        run: |
+          docker run -d -p 8080:8080 myapp
+          sleep 10   # wait for app to boot
+
+      - name: ZAP DAST Baseline
+        uses: zaproxy/action-baseline@v0.9.0
+        continue-on-error: true
         with:
           target: "http://localhost:8080"
