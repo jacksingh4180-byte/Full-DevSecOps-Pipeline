@@ -1,3 +1,70 @@
+name: DevSecOps Pipeline
+
+on: [push, pull_request]
+
+jobs:
+
+  # =====================================================
+  # 1. SAST (Snyk Code)
+  # =====================================================
+  sast:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: snyk/actions/setup@master
+
+      - name: Run Snyk SAST
+        id: sast-scan
+        run: |
+          snyk code test --severity-threshold=high --json > sast-report.json || echo "SAST_FAILED=true" >> $GITHUB_ENV
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+
+      - name: Upload SAST Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: sast-report
+          path: sast-report.json
+
+      - name: Fail SAST Job If Issues Found
+        if: env.SAST_FAILED == 'true'
+        run: exit 1
+
+
+  # =====================================================
+  # 2. SCA (Snyk Open Source)
+  # =====================================================
+  sca:
+    runs-on: ubuntu-latest
+    needs: sast
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: snyk/actions/setup@master
+
+      - name: Run Snyk SCA
+        id: sca-scan
+        run: |
+          snyk test --all-projects --severity-threshold=high --json > sca-report.json || echo "SCA_FAILED=true" >> $GITHUB_ENV
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+
+      - name: Upload SCA Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: sca-report
+          path: sca-report.json
+
+      - name: Fail SCA Job If Issues Found
+        if: env.SCA_FAILED == 'true'
+        run: exit 1
+
+
+  # =====================================================
+  # 3. IaC (Snyk IaC)
+  # =====================================================
   iac:
     runs-on: ubuntu-latest
     needs: sca
@@ -5,14 +72,12 @@
 
     steps:
       - uses: actions/checkout@v4
-
       - uses: snyk/actions/setup@master
 
-      - name: Run IaC Scan
+      - name: Run Snyk IaC Scan
         id: iac-scan
         run: |
-          # Run scan but never stop execution
-          snyk iac test --severity-threshold=high --json > iac-report.json || echo "IAC_SCAN_FAILED=true" >> $GITHUB_ENV
+          snyk iac test --severity-threshold=high --json > iac-report.json || echo "IAC_FAILED=true" >> $GITHUB_ENV
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
 
@@ -22,6 +87,76 @@
           name: iac-report
           path: iac-report.json
 
-      - name: Fail job if IaC issues found
-        if: env.IAC_SCAN_FAILED == 'true'
+      - name: Fail IaC Job If Issues Found
+        if: env.IAC_FAILED == 'true'
         run: exit 1
+
+
+  # =====================================================
+  # 4. DAST (OWASP ZAP Baseline)
+  # =====================================================
+  dast:
+    runs-on: ubuntu-latest
+    needs: iac
+    continue-on-error: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build App Docker Image
+        run: docker build -t myapp .
+
+      - name: Run App Container
+        run: |
+          docker run -d -p 8080:8080 --name devsecapp myapp
+          sleep 15
+
+      - name: Run ZAP Baseline Scan
+        id: zap-scan
+        uses: zaproxy/action-baseline@v0.9.0
+        with:
+          target: "http://localhost:8080"
+          cmd_options: "-j"
+
+      - name: Mark DAST Failed
+        if: failure()
+        run: echo "DAST_FAILED=true" >> $GITHUB_ENV
+
+      - name: Upload ZAP Report
+        uses: actions/upload-artifact@v4
+        with:
+          name: zap-report
+          path: zap_baseline.json
+
+      - name: Fail DAST Job If Issues Found
+        if: env.DAST_FAILED == 'true'
+        run: exit 1
+
+
+
+  # =====================================================
+  # 5. FINAL SUMMARY CHECK (Fail Pipeline if ANY scan failed)
+  # =====================================================
+  summary:
+    runs-on: ubuntu-latest
+    needs: [sast, sca, iac, dast]
+
+    steps:
+      - name: Fail if SAST Failed
+        if: ${{ needs.sast.result == 'failure' }}
+        run: exit 1
+
+      - name: Fail if SCA Failed
+        if: ${{ needs.sca.result == 'failure' }}
+        run: exit 1
+
+      - name: Fail if IaC Failed
+        if: ${{ needs.iac.result == 'failure' }}
+        run: exit 1
+
+      - name: Fail if DAST Failed
+        if: ${{ needs.dast.result == 'failure' }}
+        run: exit 1
+
+      - name: All Scans Passed
+        run: echo "All DevSecOps security checks passed!"
