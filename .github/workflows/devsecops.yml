@@ -10,7 +10,7 @@ jobs:
   sast:
     runs-on: ubuntu-latest
     outputs:
-      sast_failed: ${{ steps.sast-scan.outputs.failed }}
+      failed: ${{ steps.sast-scan.outputs.failed }}
 
     steps:
       - uses: actions/checkout@v4
@@ -19,9 +19,7 @@ jobs:
       - name: Run Snyk SAST
         id: sast-scan
         run: |
-          # Run Snyk and capture non-zero exit into step output 'failed'
           snyk code test --severity-threshold=high --json > sast-report.json || echo "failed=true" >> $GITHUB_OUTPUT
-          echo "report_path=sast-report.json" >> $GITHUB_OUTPUT
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
 
@@ -31,14 +29,20 @@ jobs:
           name: sast-report
           path: sast-report.json
 
+      - name: Fail SAST Job
+        if: steps.sast-scan.outputs.failed == 'true'
+        run: exit 1
+
+
   # =====================================================
   # 2. SCA (Snyk Open Source)
   # =====================================================
   sca:
     runs-on: ubuntu-latest
     needs: sast
+    continue-on-error: true
     outputs:
-      sca_failed: ${{ steps.sca-scan.outputs.failed }}
+      failed: ${{ steps.sca-scan.outputs.failed }}
 
     steps:
       - uses: actions/checkout@v4
@@ -48,7 +52,6 @@ jobs:
         id: sca-scan
         run: |
           snyk test --all-projects --severity-threshold=high --json > sca-report.json || echo "failed=true" >> $GITHUB_OUTPUT
-          echo "report_path=sca-report.json" >> $GITHUB_OUTPUT
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
 
@@ -58,14 +61,21 @@ jobs:
           name: sca-report
           path: sca-report.json
 
+      - name: Fail SCA Job
+        if: steps.sca-scan.outputs.failed == 'true'
+        run: exit 1
+
+
+
   # =====================================================
   # 3. IaC (Snyk IaC)
   # =====================================================
   iac:
     runs-on: ubuntu-latest
     needs: sca
+    continue-on-error: true
     outputs:
-      iac_failed: ${{ steps.iac-scan.outputs.failed }}
+      failed: ${{ steps.iac-scan.outputs.failed }}
 
     steps:
       - uses: actions/checkout@v4
@@ -75,7 +85,6 @@ jobs:
         id: iac-scan
         run: |
           snyk iac test --severity-threshold=high --json > iac-report.json || echo "failed=true" >> $GITHUB_OUTPUT
-          echo "report_path=iac-report.json" >> $GITHUB_OUTPUT
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
 
@@ -85,14 +94,21 @@ jobs:
           name: iac-report
           path: iac-report.json
 
+      - name: Fail IaC Job
+        if: steps.iac-scan.outputs.failed == 'true'
+        run: exit 1
+
+
+
   # =====================================================
   # 4. DAST (OWASP ZAP Baseline)
   # =====================================================
   dast:
     runs-on: ubuntu-latest
     needs: iac
+    continue-on-error: true
     outputs:
-      dast_failed: ${{ steps.zap-scan.outputs.failed }}
+      failed: ${{ steps.dast-check.outputs.failed }}
 
     steps:
       - uses: actions/checkout@v4
@@ -102,14 +118,8 @@ jobs:
 
       - name: Run App Container
         run: |
-          docker run -d -p 8080:8080 --name devsecapp myapp || true
-          # wait for app to become available
-          for i in {1..15}; do
-            if curl -sSf http://localhost:8080 >/dev/null 2>&1; then
-              break
-            fi
-            sleep 2
-          done
+          docker run -d -p 8080:8080 --name devsecapp myapp
+          sleep 15
 
       - name: Run ZAP Baseline Scan
         id: zap-scan
@@ -117,24 +127,11 @@ jobs:
         with:
           target: "http://localhost:8080"
           cmd_options: "-j"
-        # If the action exits non-zero, capture into step output 'failed' so job still continues:
-        continue-on-error: false
 
-      # Mark failure for ZAP if the previous step produced a non-zero exit (we need to detect it).
-      # The zap action writes zap_baseline.json on success; when it fails it may not. We will check exit code via a wrapper:
-      - name: Normalize ZAP result to step output
-        if: always()
-        id: zap-scan-result
-        run: |
-          # If zap produced a baseline JSON, treat it as success; otherwise mark failed
-          if [ -f zap_baseline.json ]; then
-            # check if alerts exist: if file contains "alerts" and non-empty, we could parse; but the action already returned non-zero on alerts.
-            echo "failed=false" >> $GITHUB_OUTPUT
-            echo "report_path=zap_baseline.json" >> $GITHUB_OUTPUT
-          else
-            echo "failed=true" >> $GITHUB_OUTPUT
-            echo "report_path=zap_baseline.json" >> $GITHUB_OUTPUT
-          fi
+      - name: Mark DAST Failed
+        id: dast-check
+        if: failure()
+        run: echo "failed=true" >> $GITHUB_OUTPUT
 
       - name: Upload ZAP Report
         uses: actions/upload-artifact@v4
@@ -142,33 +139,35 @@ jobs:
           name: zap-report
           path: zap_baseline.json
 
-      - name: Cleanup App Container
-        if: always()
-        run: |
-          docker ps -a --filter "name=devsecapp" --format "{{.ID}}" | xargs -r docker rm -f
+      - name: Fail DAST Job
+        if: steps.dast-check.outputs.failed == 'true'
+        run: exit 1
+
+
 
   # =====================================================
-  # 5. SUMMARY: Fail overall workflow if ANY scan reported failure
+  # 5. FINAL SUMMARY → FAIL OVERALL WORKFLOW
   # =====================================================
   summary:
     runs-on: ubuntu-latest
     needs: [sast, sca, iac, dast]
 
     steps:
-      - name: Show job outputs (debug)
-        run: |
-          echo "sast_failed: ${{ needs.sast.outputs.sast_failed }}"
-          echo "sca_failed:  ${{ needs.sca.outputs.sca_failed }}"
-          echo "iac_failed:  ${{ needs.iac.outputs.iac_failed }}"
-          echo "dast_failed: ${{ needs.dast.outputs.dast_failed }}"
+      - name: Fail if SAST Failed
+        if: ${{ needs.sast.outputs.failed == 'true' }}
+        run: exit 1
 
-      - name: Fail if any scan failed
-        run: |
-          if [ "${{ needs.sast.outputs.sast_failed }}" = "true" ] || \
-             [ "${{ needs.sca.outputs.sca_failed }}" = "true" ] || \
-             [ "${{ needs.iac.outputs.iac_failed }}" = "true" ] || \
-             [ "${{ needs.dast.outputs.dast_failed }}" = "true" ]; then
-            echo "One or more scans detected HIGH/CRITICAL issues. Failing workflow."
-            exit 1
-          fi
-          echo "All scans passed the configured severity threshold."
+      - name: Fail if SCA Failed
+        if: ${{ needs.sca.outputs.failed == 'true' }}
+        run: exit 1
+
+      - name: Fail if IaC Failed
+        if: ${{ needs.iac.outputs.failed == 'true' }}
+        run: exit 1
+
+      - name: Fail if DAST Failed
+        if: ${{ needs.dast.outputs.failed == 'true' }}
+        run: exit 1
+
+      - name: Pipeline Passed
+        run: echo "All DevSecOps scans passed successfully!"
