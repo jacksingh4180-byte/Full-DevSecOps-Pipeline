@@ -1,0 +1,19 @@
+name: DevSecOps Pipeline
+on: [push]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: snyk/actions/setup@master
+      - run: snyk code test
+        env: { SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }} }
+      - run: snyk test --all-projects
+        env: { SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }} }
+      - run: snyk iac test
+        env: { SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }} }
+      - run: docker build -t myapp .
+      - run: docker run -d -p 8080:8080 myapp
+      - uses: zaproxy/action-baseline@v0.9.0
+        with:
+          target: "http://localhost:8080"
