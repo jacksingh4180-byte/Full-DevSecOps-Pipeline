@@ -1,6 +1,20 @@
+# Use official Node.js 18 LTS image
 FROM node:18
+
+# Set working directory
 WORKDIR /app
+
+# Copy only package files first (for efficient caching)
+COPY package*.json ./
+
+# Install dependencies
+RUN npm install --production
+
+# Copy the rest of the app
 COPY . .
-RUN npm install
+
+# Expose app port
 EXPOSE 8080
-CMD ["npm","start"]
+
+# Run the server
+CMD ["npm", "start"]
