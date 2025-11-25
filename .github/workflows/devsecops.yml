@@ -4,7 +4,10 @@ on: [push, pull_request]
 
 jobs:
 
-  sast_sca_iac:
+  # --------------------------
+  # 1. SAST - Snyk Code
+  # --------------------------
+  sast:
     runs-on: ubuntu-latest
 
     steps:
@@ -12,30 +15,54 @@ jobs:
 
       - uses: snyk/actions/setup@master
 
-      # SAST (fail but continue pipeline)
-      - name: Snyk SAST
+      - name: Snyk SAST Scan
         run: snyk code test
         continue-on-error: true
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
 
-      # SCA (fail but continue pipeline)
-      - name: Snyk SCA
+  # --------------------------
+  # 2. SCA - Snyk Open Source
+  # --------------------------
+  sca:
+    runs-on: ubuntu-latest
+    needs: sast   # Run after SAST
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: snyk/actions/setup@master
+
+      - name: Snyk SCA Scan
         run: snyk test --all-projects
         continue-on-error: true
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
 
-      # IaC Scan (fail but continue pipeline)
-      - name: Snyk IaC
+  # --------------------------
+  # 3. IaC - Snyk IaC
+  # --------------------------
+  iac:
+    runs-on: ubuntu-latest
+    needs: sca  # Run after SCA
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: snyk/actions/setup@master
+
+      - name: Snyk IaC Scan
         run: snyk iac test
         continue-on-error: true
         env:
           SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
 
-  dast_zap:
+  # --------------------------
+  # 4. DAST - OWASP ZAP Baseline
+  # --------------------------
+  dast:
     runs-on: ubuntu-latest
-    needs: sast_sca_iac  # Run DAST after SAST/SCA/IaC
+    needs: iac  # Run after IaC
 
     steps:
       - uses: actions/checkout@v4
@@ -44,9 +71,11 @@ jobs:
         run: docker build -t myapp .
 
       - name: Run App
-        run: docker run -d -p 8080:8080 myapp
+        run: |
+          docker run -d -p 8080:8080 myapp
+          sleep 10   # wait for app to boot
 
-      - name: ZAP Baseline Scan (fail but continue)
+      - name: ZAP DAST Baseline
         uses: zaproxy/action-baseline@v0.9.0
         continue-on-error: true
         with:
